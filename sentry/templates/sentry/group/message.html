@@ -44,6 +44,10 @@
         <h2>More Information</h2>
 
         <table>
+			<tr>
+				<th class="key">Date</th>
+				<td class="values">{{ message.datetime }}</td>
+			</tr>
             {% for k, v in json_data %}
                 <tr>
                     <th class="key">{{ k }}</th>
