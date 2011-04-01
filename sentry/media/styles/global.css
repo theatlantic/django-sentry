@@ -409,7 +409,7 @@ dl.flat dd {
     background: -moz-linear-gradient(top,  #4da2e5,  #3079d0); /* for firefox 3.6+ */
 
 }
-.priority-veryhigh .count {
+.level-50 .count {
     background: #e22e2e;
     -webkit-box-shadow: 0 1px 2px rgba(0,0,0,.2);
     -moz-box-shadow: 0 1px 2px rgba(0,0,0,.2);
@@ -417,18 +417,18 @@ dl.flat dd {
     background:-moz-linear-gradient(center top , #ED1C24, #AA1317) repeat scroll 0 0 transparent;
     background:-webkit-gradient(linear, 0% 0%, 0% 100%, from(#ED1C24), to(#AA1317));
 }
-.priority-high .count {
+.level-40 .count {
     background: #ff5400;
     background:-moz-linear-gradient(center top , #F16C7C, #BF404F) repeat scroll 0 0 transparent;
     background:-webkit-gradient(linear, 0% 0%, 0% 100%, from(#F16C7C), to(#BF404F));
 }
-.priority-medium .count {
+.level-30 .count {
     background: #ff7800;
     background:-moz-linear-gradient(center top , #FAA51A, #F47A20) repeat scroll 0 0 transparent;
     background:-webkit-gradient(linear, 0% 0%, 0% 100%, from(#FAA51A), to(#F47A20));
 }
-.priority-low .count,
-.priority-verylow .count {
+.level-20 .count,
+.level-10 .count {
     background: #ffb400;
     background:-moz-linear-gradient(center top , #efd57c, #e0ae00) repeat scroll 0 0 transparent;
     background:-webkit-gradient(linear, 0% 0%, 0% 100%, from(#efd57c), to(#e0ae00));
