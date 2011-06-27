@@ -1,28 +1,85 @@
+from __future__ import absolute_import
+
 import base64
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+import datetime
+import functools
 import logging
 import sys
+import time
 import traceback
 import urllib2
 import uuid
 
 from django.core.cache import cache
 from django.template import TemplateSyntaxError
+from django.template.loader import LoaderOrigin
 from django.views.debug import ExceptionReporter
 
-from sentry import conf
-from sentry.helpers import construct_checksum, varmap, transform, get_installed_apps, urlread, force_unicode, \
-                           get_versions
+import sentry
+from sentry.conf import settings
+from sentry.utils import json
+from sentry.utils import construct_checksum, varmap, transform, get_installed_apps, force_unicode, \
+                           get_versions, shorten, get_signature, get_auth_header
 
 logger = logging.getLogger('sentry.errors')
 
+def fail_silently(default=None):
+    def wrapped(func):
+        @functools.wraps(func)
+        def _wrapped(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception, e:
+                logger.exception(e)
+                return default
+        return _wrapped
+    return wrapped
+
 class SentryClient(object):
+    @fail_silently((False, None))
+    def check_throttle(self, checksum):
+        if not (settings.THRASHING_TIMEOUT and settings.THRASHING_LIMIT):
+            return (False, None)
+        
+        cache_key = 'sentry:%s' % (checksum,)
+        # We MUST do a get first to avoid re-setting the timeout when doing .add
+        added = cache.get(cache_key) is None
+        if added:
+            # Use add to avoid race conditions
+            added = cache.add(cache_key, 1, settings.THRASHING_TIMEOUT)
+
+        if added:
+            return (False, None)
+        
+        try:
+            thrash_count = cache.incr(cache_key)
+        except (KeyError, ValueError):
+            # cache.incr can fail. Assume we aren't thrashing yet, and
+            # if we are, hope that the next error has a successful
+            # cache.incr call.
+            thrash_count = 0
+
+        if thrash_count > settings.THRASHING_LIMIT:
+             return (True, self.get_last_message_id(checksum))
+
+        return (False, None)
+
+    @fail_silently()
+    def get_last_message_id(self, checksum):
+        cache_key = 'sentry:%s:last_message_id' % (checksum,)
+        
+        return cache.get(cache_key)
+
+    @fail_silently()
+    def set_last_message_id(self, checksum, message_id):
+        if settings.THRASHING_TIMEOUT and settings.THRASHING_LIMIT:
+            cache_key = 'sentry:%s:last_message_id' % (checksum,)
+        
+            cache.set(cache_key, message_id, settings.THRASHING_LIMIT + 5)
+        
     def process(self, **kwargs):
         "Processes the message before passing it on to the server"
-        from sentry.helpers import get_filters
+        from sentry.utils import get_filters
 
         if kwargs.get('data'):
             # Ensure we're not changing the original data which was passed
@@ -33,9 +90,15 @@ class SentryClient(object):
         if request:
             if not kwargs.get('data'):
                 kwargs['data'] = {}
+            
+            if not request.POST and request.raw_post_data:
+                post_data = request.raw_post_data
+            else:
+                post_data = request.POST
+
             kwargs['data'].update(dict(
                 META=request.META,
-                POST=request.POST,
+                POST=post_data,
                 GET=request.GET,
                 COOKIES=request.COOKIES,
             ))
@@ -44,7 +107,7 @@ class SentryClient(object):
                 kwargs['url'] = request.build_absolute_uri()
 
         kwargs.setdefault('level', logging.ERROR)
-        kwargs.setdefault('server_name', conf.NAME)
+        kwargs.setdefault('server_name', settings.NAME)
 
         # save versions of all installed apps
         if 'data' not in kwargs or '__sentry__' not in (kwargs['data'] or {}):
@@ -54,6 +117,12 @@ class SentryClient(object):
 
         versions = get_versions()
         kwargs['data']['__sentry__']['versions'] = versions
+
+        # Shorten lists/strings
+        for k, v in kwargs['data'].iteritems():
+            if k == '__sentry__':
+                continue
+            kwargs['data'][k] = shorten(v)
 
         if kwargs.get('view'):
             # get list of modules from right to left
@@ -78,20 +147,18 @@ class SentryClient(object):
         else:
             checksum = kwargs['checksum']
 
-        if conf.THRASHING_TIMEOUT and conf.THRASHING_LIMIT:
-            cache_key = 'sentry:%s:%s' % (kwargs.get('class_name') or '', checksum)
-            added = cache.add(cache_key, 1, conf.THRASHING_TIMEOUT)
-            if not added:
-                try:
-                    thrash_count = cache.incr(cache_key)
-                except (KeyError, ValueError):
-                    # cache.incr can fail. Assume we aren't thrashing yet, and
-                    # if we are, hope that the next error has a successful
-                    # cache.incr call.
-                    thrash_count = 0
-                if thrash_count > conf.THRASHING_LIMIT:
-                    return
+        (is_thrashing, message_id) = self.check_throttle(checksum)
 
+        if is_thrashing:
+            if request and message_id:
+                # attach the sentry object to the request
+                request.sentry = {
+                    'id': message_id,
+                    'thrashed': True,
+                }
+            
+            return message_id
+            
         for filter_ in get_filters():
             kwargs = filter_(None).process(kwargs) or kwargs
         
@@ -100,22 +167,47 @@ class SentryClient(object):
         kwargs['message_id'] = message_id
 
         # Make sure all data is coerced
-        kwargs = transform(kwargs)
+        kwargs['data'] = transform(kwargs['data'])
+
+        if 'timestamp' not in kwargs:
+            kwargs['timestamp'] = datetime.datetime.now()
 
         self.send(**kwargs)
         
+        if request:
+            # attach the sentry object to the request
+            request.sentry = {
+                'id': message_id,
+                'trashed': False,
+            }
+        
+        # store the last message_id incase we hit thrashing limits
+        self.set_last_message_id(checksum, message_id)
+        
         return message_id
+
+    def send_remote(self, url, data, headers={}):
+        req = urllib2.Request(url, headers=headers)
+        try:
+            response = urllib2.urlopen(req, data, settings.REMOTE_TIMEOUT).read()
+        except:
+            response = urllib2.urlopen(req, data).read()
+        return response
 
     def send(self, **kwargs):
         "Sends the message to the server."
-        if conf.REMOTE_URL:
-            for url in conf.REMOTE_URL:
-                data = {
-                    'data': base64.b64encode(pickle.dumps(kwargs).encode('zlib')),
-                    'key': conf.KEY,
+        if settings.REMOTE_URL:
+            for url in settings.REMOTE_URL:
+                message = base64.b64encode(json.dumps(kwargs).encode('zlib'))
+                timestamp = time.time()
+                signature = get_signature(message, timestamp)
+                headers={
+                    'Authorization': get_auth_header(signature, timestamp, '%s/%s' % (self.__class__.__name__, sentry.VERSION)),
+                    'Content-Type': 'application/octet-stream',
                 }
+                
                 try:
-                    urlread(url, post=data, timeout=conf.REMOTE_TIMEOUT)
+                    return self.send_remote(url=url, data=message, headers=headers)
                 except urllib2.HTTPError, e:
                     body = e.read()
                     logger.error('Unable to reach Sentry log server: %s (url: %%s, body: %%s)' % (e,), url, body,
@@ -135,14 +227,14 @@ class SentryClient(object):
         Creates an error log for a ``logging`` module ``record`` instance.
         """
         for k in ('url', 'view', 'request', 'data'):
-            if k not in kwargs:
+            if not kwargs.get(k):
                 kwargs[k] = record.__dict__.get(k)
         
         kwargs.update({
             'logger': record.name,
             'level': record.levelno,
             'message': force_unicode(record.msg),
-            'server_name': conf.NAME,
+            'server_name': settings.NAME,
         })
         
         # construct the checksum with the unparsed message
@@ -179,20 +271,14 @@ class SentryClient(object):
 
         exc_type, exc_value, exc_traceback = exc_info
 
-        def shorten(var):
-            var = transform(var)
-            if isinstance(var, basestring) and len(var) > 200:
-                var = var[:200] + '...'
-            return var
-
         reporter = ExceptionReporter(None, exc_type, exc_value, exc_traceback)
         frames = varmap(shorten, reporter.get_traceback_frames())
 
         if not kwargs.get('view'):
             # This should be cached
             modules = get_installed_apps()
-            if conf.INCLUDE_PATHS:
-                modules = set(list(modules) + conf.INCLUDE_PATHS)
+            if settings.INCLUDE_PATHS:
+                modules = set(list(modules) + settings.INCLUDE_PATHS)
 
             def iter_tb_frames(tb):
                 while tb:
@@ -217,7 +303,7 @@ class SentryClient(object):
                 except:
                     continue
                 if contains(modules, view):
-                    if not (contains(conf.EXCLUDE_PATHS, view) and best_guess):
+                    if not (contains(settings.EXCLUDE_PATHS, view) and best_guess):
                         best_guess = view
                 elif best_guess:
                     break
@@ -236,7 +322,8 @@ class SentryClient(object):
             'exc': map(transform, [exc_module, exc_value.args, frames]),
         }
 
-        if isinstance(exc_value, TemplateSyntaxError) and hasattr(exc_value, 'source'):
+        if (isinstance(exc_value, TemplateSyntaxError) and \
+            isinstance(getattr(exc_value, 'source', None), (tuple, list)) and isinstance(exc_value.source[0], LoaderOrigin)):
             origin, (start, end) = exc_value.source
             data['__sentry__'].update({
                 'template': (origin.reload(), start, end, origin.name),

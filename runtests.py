@@ -2,6 +2,7 @@
 import logging
 import sys
 from os.path import dirname, abspath, join
+from optparse import OptionParser
 
 logging.getLogger('sentry').addHandler(logging.StreamHandler())
 
@@ -10,6 +11,12 @@ from django.conf import settings
 if not settings.configured:
     settings.configure(
         DATABASE_ENGINE='sqlite3',
+        DATABASES={
+            'default': {
+                'ENGINE': 'sqlite3',
+                'TEST_NAME': 'sentry_tests.db',
+            },
+        },
         # HACK: this fixes our threaded runserver remote tests
         # DATABASE_NAME='test_sentry',
         # TEST_DATABASE_NAME='test_sentry',
@@ -22,8 +29,6 @@ if not settings.configured:
             # Included to fix Disqus' test Django which solves IntegrityMessage case
             'django.contrib.contenttypes',
 
-            'paging',
-            'indexer',
             'south',
             'djcelery', # celery client
             'haystack',
@@ -37,8 +42,7 @@ if not settings.configured:
             'sentry.plugins.sentry_urls',
             'sentry.plugins.sentry_redmine',
 
-            # No fucking idea why I have to do this
-            'sentry.tests',
+            'tests',
         ],
         ROOT_URLCONF='',
         DEBUG=False,
@@ -63,18 +67,22 @@ if not settings.configured:
 
 from django.test.simple import run_tests
 
-def runtests(*test_args):
+def runtests(*test_args, **kwargs):
     if 'south' in settings.INSTALLED_APPS:
         from south.management.commands import patch_for_test_db_setup
         patch_for_test_db_setup()
 
     if not test_args:
-        test_args = ['sentry']
+        test_args = ['tests']
     parent = dirname(abspath(__file__))
     sys.path.insert(0, parent)
-    failures = run_tests(test_args, verbosity=1, interactive=True)
+    failures = run_tests(test_args, verbosity=kwargs.get('verbosity', 1), interactive=kwargs.get('interactive', False), failfast=kwargs.get('failfast'))
     sys.exit(failures)
 
-
 if __name__ == '__main__':
-    runtests(*sys.argv[1:])
+    parser = OptionParser()
+    parser.add_option('--failfast', action='store_true', default=False, dest='failfast')
+
+    (options, args) = parser.parse_args()
+
+    runtests(failfast=options.failfast, *args)
