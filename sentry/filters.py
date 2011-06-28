@@ -116,6 +116,7 @@ class StatusFilter(SentryFilter):
 class LoggerFilter(SentryFilter):
     label = 'Logger'
     column = 'logger'
+    default = 'root'
 
 class ServerNameFilter(SentryFilter):
     label = 'Server Name'
