@@ -162,15 +162,15 @@ def index(request):
     message_list = GroupedMessage.objects.all()
 
     sort = request.GET.get('sort')
-    if sort == 'date':
-        message_list = message_list.order_by('-last_seen')
+    if sort == 'priority':
+        message_list = message_list.order_by('-score', '-last_seen')
     elif sort == 'new':
         message_list = message_list.order_by('-first_seen')
     elif sort == 'freq':
         message_list = message_list.order_by('-times_seen')
     else:
-        sort = 'priority'
-        message_list = message_list.order_by('-score', '-last_seen')
+        sort = 'date'
+        message_list = message_list.order_by('-last_seen')
     
     # Filters only apply if we're not searching
     any_filter = False
