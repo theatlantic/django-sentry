@@ -1,4 +1,5 @@
 from __future__ import absolute_import
+import functools
 
 import base64
 try:
@@ -14,6 +15,7 @@ from django.db import models
 from django.db.models import Count
 from django.utils.encoding import smart_unicode
 from django.utils.translation import ugettext_lazy as _
+from django.core.urlresolvers import NoReverseMatch
 
 from sentry.conf import settings
 from sentry.utils import cached_property, construct_checksum, transform, get_filters, \
@@ -33,6 +35,19 @@ STATUS_LEVELS = (
     (0, _('unresolved')),
     (1, _('resolved')),
 )
+
+def safe_link(f):
+    """
+    Adds a permalink to url, making sure to not throw reverse errors.
+    """
+    @functools.wraps(f)
+    def _f(*args, **kwargs):
+        try:
+            res = f(*args, **kwargs)
+        except NoReverseMatch:
+            res = ''
+        return res
+    return _f
 
 class GzippedDictField(models.TextField):
     """
@@ -127,6 +142,7 @@ class GroupedMessage(MessageBase):
     def __unicode__(self):
         return "(%s) %s" % (self.times_seen, self.error())
 
+    @safe_link
     @models.permalink
     def get_absolute_url(self):
         return ('sentry-group', (self.pk,), {})
@@ -159,10 +175,14 @@ class GroupedMessage(MessageBase):
         except:
             request_repr = "Request repr() unavailable"
 
-        if request:
-            link = request.build_absolute_url(self.get_absolute_url())
+        # If we are a client, we don't have the paths for absolute_urls
+        if not getattr(settings, 'SENTRY_CLIENT', True):
+            if request:
+                link = request.build_absolute_url(self.get_absolute_url())
+            else:
+                link = '%s%s' % (settings.URL_PREFIX, self.get_absolute_url())
         else:
-            link = '%s%s' % (settings.URL_PREFIX, self.get_absolute_url())
+            link  = ''
 
         body = render_to_string('sentry/emails/error.txt', {
             'request_repr': request_repr,
@@ -229,6 +249,7 @@ class Message(MessageBase):
             self.checksum = construct_checksum(**self.__dict__)
         super(Message, self).save(*args, **kwargs)
 
+    @safe_link
     @models.permalink
     def get_absolute_url(self):
         return ('sentry-group-message', (self.group_id, self.pk), {})
